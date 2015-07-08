@@ -1,0 +1,16 @@
+{
+  "name": "cashila/php-api-wrapper",
+  "type": "library",
+  "description": "PHP API for Cashila.com",
+  "keywords": ["cashila"],
+  "license": "MIT",
+  "autoload": {
+    "psr-4": {
+      "Cashila\\Api\\": "src/"
+    }
+  },
+  "require": {
+    "php": ">=5.4.0",
+    "ext-curl": "*"
+  }
+}
