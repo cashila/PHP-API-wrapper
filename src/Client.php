@@ -195,7 +195,7 @@ class Client {
       if (isset($args[0]) && is_string($args[0])) {
         $path = $args[0];
       } else {
-        throw \InvalidArgumentException("Missing or mismatch path argument.");
+        throw new \InvalidArgumentException("Missing or mismatch path argument.");
       }
 
       $nonce = null;
@@ -209,7 +209,7 @@ class Client {
         } else if (is_string($args[1])) {
           $payload = $args[1];
         } else {
-          throw \InvalidArgumentException("Missing or mismatch payload argument.");
+          throw new \InvalidArgumentException("Missing or mismatch payload argument.");
         }
       }
 
@@ -225,7 +225,7 @@ class Client {
       return $this->_executeRequest($curl);
     }
 
-    throw \BadMethodCallException("Unknown method $method");
+    throw new \BadMethodCallException("Unknown method $method");
   }
 
   /**
@@ -323,6 +323,13 @@ class Client {
       ]);
     }
 
+    if ($payload!=null) {
+      curl_setopt($curl, CURLOPT_POSTFIELDS, $payload);
+      $headers['Content-Type'] =  'application/json';
+    } else {
+      curl_setopt($curl, CURLOPT_POSTFIELDS, null);
+    }
+
     curl_setopt_array($curl, [
       CURLOPT_URL => $url,
       CURLOPT_CUSTOMREQUEST => $method,
@@ -330,10 +337,6 @@ class Client {
         return "$name: {$headers[$name]}";
       }, array_keys($headers))
     ]);
-
-    if ($payload!=null) {
-      curl_setopt($curl, CURLOPT_POSTFIELDS, $payload);
-    }
 
     return $curl;
   }
@@ -364,7 +367,10 @@ class Client {
         throw $ex;
       }
 
-      return $result['result'];
+      if (isset($result['result'])) {
+        return $result['result'];
+      }
+      return null;
     }
 
     throw new Exception("Request at ".curl_getinfo($curl, CURLINFO_EFFECTIVE_URL)." failed");
@@ -397,7 +403,7 @@ class Client {
     // sign payload
     $res = $cb($uri);
     if (!is_array($res) || !isset($res['address']) || !isset($res['signature'])) {
-      throw new InvalidArgumentException("Signing function must sign uri and return array with address and signature field set.");
+      throw new \InvalidArgumentException("Signing function must sign uri and return array with address and signature field set.");
     }
 
     // build post url
@@ -415,7 +421,9 @@ class Client {
 
     // store token/secret
     $res = $client->_executeRequest($curl);
-    $client->setAuth($res);
+    if ($res) {
+      $client->setAuth($res);
+    }
   }
 
   /**
@@ -428,10 +436,7 @@ class Client {
    */
   public static function bitIdPair($uri, callable $cb) {
     $inst = new static();
-
-    $this->_processBitId($inst, $uri, $cb);
-
-    return $inst;
+    $inst->_processBitId($inst, $uri, $cb);
   }
 
   /**
@@ -448,7 +453,7 @@ class Client {
     $res = $inst->publicPost('bitid/request-token');
 
     // authorize
-    $this->_processBitId($inst, $res['uri'], $cb);
+    $inst->_processBitId($inst, $res['uri'], $cb);
 
     return $inst;
   }
