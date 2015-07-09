@@ -2,6 +2,14 @@
 
 This package is a wrapper for [Cashila API](https://www.cashila.com/docs/api).
 
+## Installation
+
+Install the latest version with
+
+```bash
+composer require cashila/php-api-wrapper dev-master
+```
+
 ## Usage
 
 You will need api key to use this. You can create one on [API page](https://www.cashila.com/api-keys).
