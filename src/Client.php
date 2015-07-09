@@ -204,9 +204,9 @@ class Client {
       if (isset($args[1])) {
         if ($method=='GET') {
           $query = $args[1];
-        } else if (is_array($args[1]) || is_a($args[1])) {
+        } else if (is_array($args[1])) {
           $payload = json_encode($args[1]);
-        } else if (is_string($args[1])) {
+        } else if (is_string($args[1]) || is_object($args[1]) && $args[1] instanceof \SplFileInfo) {
           $payload = $args[1];
         } else {
           throw new \InvalidArgumentException("Missing or mismatch payload argument.");
@@ -238,6 +238,9 @@ class Client {
       $this->_curl = curl_init();
       curl_setopt_array($this->_curl, [
         CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_USERAGENT => 'Cashila PHP API Agent',
       ]);
     }
 
@@ -271,7 +274,7 @@ class Client {
   * @param string method, eg. get/post/...
   * @param string path, eg. billpays/create
   * @param array|string query
-  * @param string payload, must already be serialized
+  * @param mixed payload, must already be serialized or instanceof \SplFileInfo
   * @param string nonce
   * @param array headers, additional headers to send
   * @throws \InvalidArgumentException
@@ -289,6 +292,7 @@ class Client {
     if ($clientId = $this->getClientId()) {
       $headers['API-Client'] = $clientId;
     }
+    $curlOptions = [];
 
     if (!$isPathUri) {
       $fullPath = "/v{$this->getVersion()}/$path";
@@ -309,7 +313,29 @@ class Client {
         throw new \InvalidArgumentException("Can not call private method without valid token and/or secret.");
       }
 
-      $payloadHash = hash('sha256', $nonce.$payload, true);
+      // if payload is file, we calculate hash using
+      // tmp file to avoid excessive memory usage
+      if (is_object($payload) && $payload instanceof \SplFileInfo) {
+        // prepare files
+        $payFp = fopen($payload->getPathname(), 'r');
+        $tempName = tempnam(sys_get_temp_dir(), 'cashila_');
+        $tmpFp = fopen($tempName, 'w');
+
+        // write content
+        fwrite($tmpFp, (string)$nonce);
+        stream_copy_to_stream($payFp, $tmpFp);
+        // payFp will be closed after it is uploaded
+        fclose($tmpFp);
+
+        // calc hash
+        $payloadHash = hash_file('sha256', $tempName, true);
+
+        // cleanup
+        unlink($tempName);
+      } else {
+        $payloadHash = hash('sha256', $nonce.$payload, true);
+      }
+
       $rawSign = hash_hmac(
         'sha512',
         "{$method}{$fullPath}{$payloadHash}",
@@ -323,20 +349,67 @@ class Client {
       ]);
     }
 
-    if ($payload!=null) {
-      curl_setopt($curl, CURLOPT_POSTFIELDS, $payload);
-      $headers['Content-Type'] =  'application/json';
-    } else {
-      curl_setopt($curl, CURLOPT_POSTFIELDS, null);
-    }
-
-    curl_setopt_array($curl, [
+    $curlOptions = [
+      CURLOPT_INFILE => null,
+      CURLOPT_INFILESIZE => null,
+      CURLOPT_PUT => false,
+      CURLOPT_POSTFIELDS => null,
+      CURLOPT_BINARYTRANSFER => false,
       CURLOPT_URL => $url,
       CURLOPT_CUSTOMREQUEST => $method,
+    ];
+
+    if ($payload!=null) {
+      if ($payload instanceof \SplFileInfo) {
+        $headers['Content-Type'] =  'application/octet-stream';
+
+        $uploaded = 0;
+        $totalSize = $payload->getSize();
+        rewind($payFp);
+
+        $curlOptions = array_replace($curlOptions, [
+          CURLOPT_INFILE => $payFp,
+          CURLOPT_INFILESIZE => $totalSize,
+          CURLOPT_PUT => true,
+          CURLOPT_BINARYTRANSFER => true,
+          CURLOPT_READFUNCTION => function($curl, $fp, $maxSize) use(&$uploaded, $totalSize) {
+            do {
+              if (feof($fp)) {
+                $res = '';
+                break;
+              }
+
+              $res = fread($fp, $maxSize);
+              if ($res===false) {
+                $res = '';
+                break;
+              }
+
+              $uploaded += strlen($res);
+              if ($uploaded==$totalSize) {
+                break;
+              }
+
+              return $res;
+            } while(false);
+
+            fclose($fp);
+            return $res;
+          }
+        ]);
+      } else {
+        $headers['Content-Type'] =  'application/json';
+        $curlOptions[CURLOPT_POSTFIELDS] = $payload;
+      }
+    }
+
+    // build headers
+    $curlOptions = array_replace($curlOptions, [
       CURLOPT_HTTPHEADER => array_map(function($name) use($headers) {
         return "$name: {$headers[$name]}";
       }, array_keys($headers))
     ]);
+    curl_setopt_array($curl, $curlOptions);
 
     return $curl;
   }
@@ -347,8 +420,11 @@ class Client {
   * @throws Exception
   * @return array processed response
   */
-  protected function _executeRequest($curl) {
+  protected function _executeRequest($curl, $isBitId=false) {
     $response = curl_exec($curl);
+    if ($response===false) {
+      throw new Exception('CURL error: '.curl_error($curl));
+    }
 
     $code = curl_getinfo($curl, CURLINFO_HTTP_CODE);
     if ($code>=200 && $code<400) {
@@ -367,10 +443,21 @@ class Client {
         throw $ex;
       }
 
-      if (isset($result['result'])) {
-        return $result['result'];
+      if ($isBitId) {
+        return $result;
       }
-      return null;
+      return $result['result'];
+    }
+
+    if ($isBitId) {
+      $json = @json_decode($response, true);
+      if (is_array($json) && isset($json['message'])) {
+        $ex = new Exception($json['message']);
+        if (isset($json['user_message'])) {
+          $ex->setUserMessage($json['user_message']);
+        }
+        throw $ex;
+      }
     }
 
     throw new Exception("Request at ".curl_getinfo($curl, CURLINFO_EFFECTIVE_URL)." failed");
@@ -399,7 +486,7 @@ class Client {
    * @param string $uri bitid uri
    * @param callable $cb
    */
-  protected function _processBitId(Client $client, $uri, callable $cb) {
+  protected function _processBitId(Client $client, $uri, callable $cb, $isBitId) {
     // sign payload
     $res = $cb($uri);
     if (!is_array($res) || !isset($res['address']) || !isset($res['signature'])) {
@@ -420,10 +507,7 @@ class Client {
     ]));
 
     // store token/secret
-    $res = $client->_executeRequest($curl);
-    if ($res) {
-      $client->setAuth($res);
-    }
+    return $client->_executeRequest($curl, $isBitId);
   }
 
   /**
@@ -436,7 +520,7 @@ class Client {
    */
   public static function bitIdPair($uri, callable $cb) {
     $inst = new static();
-    $inst->_processBitId($inst, $uri, $cb);
+    $inst->_processBitId($inst, $uri, $cb, true);
   }
 
   /**
@@ -453,8 +537,140 @@ class Client {
     $res = $inst->publicPost('bitid/request-token');
 
     // authorize
-    $inst->_processBitId($inst, $res['uri'], $cb);
+    $res = $inst->_processBitId($inst, $res['uri'], $cb, false);
+
+    // store token and secret
+    $inst->setAuth($res);
 
     return $inst;
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#get/exchange-rate/currency
+   */
+  public function getExchangeRate($currency='EUR') {
+    $res = $this->publicGet("exchange-rate/$currency");
+    return $res['rate'];
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#get/billpays
+   */
+  public function listBillPays(array $params=[]) {
+    return $this->privateGet('billpays', $params);
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#get/billpays/id
+   */
+  public function getBillPay($id) {
+    return $this->privateGet("billpays/$id");
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#post/billpays/id/revive
+   */
+  public function reviveBillPay($id) {
+    return $this->privatePost("billpays/$id/revive");
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#delete/billpays/id
+   */
+  public function deleteBillPay($id) {
+    return $this->privateDelete("billpays/$id");
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#put/billpays/id
+   */
+  public function createBillPayFor($recipientId, array $payment) {
+    $params = array_merge([
+      'based_on'=>$recipientId,
+    ], $payment);
+    return $this->privatePut('billpays/create', $params);
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#put/billpays/id
+   */
+  public function createBillPay(array $params) {
+    return $this->privatePut('billpays/create', $params);
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#get/recipients
+   */
+  public function listRecipients(array $params=[]) {
+    return $this->privateGet('recipients', $params);
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#get/recipients/id
+   */
+  public function getRecipient($id) {
+    return $this->privateGet("recipients/$id");
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#delete/recipients/id
+   */
+  public function deleteRecipient($id) {
+    return $this->privateDelete("recipients/$id");
+  }
+
+  /**
+   *  @link http://localhost:8000/docs/api#delete/recipients/id
+   */
+  public function createRecipient(array $params) {
+    return $this->privatePut("recipients", $params);
+  }
+
+  /**
+   * http://localhost:8000/docs/api#get/verification
+   */
+  public function getVerification() {
+    return $this->privateGet('verification');
+  }
+
+  /**
+   * Updates verification details and uploads verification documents
+   *
+   * $documents array should be array of document filenames, where keys are:
+   *   gov-id-front, gov-id-back and residence
+   *
+   * http://localhost:8000/docs/api#put/verification
+   */
+  public function updateVerification(array $personal, array $documents=[]) {
+    // check if documents are readable
+    array_walk($documents, function($filename) {
+      if (!is_readable($filename)) {
+        throw new \InvalidArgumentException("Documents array should contain readable paths to documents");
+      }
+    });
+
+    $this->privatePut('verification', $personal);
+
+    foreach ($documents as $type=>$fileName) {
+      $this->privatePut("verification/{$type}", new \SplFileInfo($fileName));
+    }
+
+    return $this->privateGet('verification');
+  }
+
+  /**
+   * @link http://localhost:8000/docs/api#get/account/limits
+   */
+  public function getAccountLimits() {
+    return $this->privateGet('account/limits');
+  }
+
+  /**
+   * @link http://localhost:8000/docs/api#post/account/deep-link
+   */
+  public function createDeepLink($resource) {
+    return $this->privatePost('account/deep-link', [
+      'resource' => $resource
+    ]);
   }
 }
