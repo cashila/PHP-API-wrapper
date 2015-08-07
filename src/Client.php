@@ -350,7 +350,10 @@ class Client {
     }
 
     $curlOptions = [
-      CURLOPT_INFILE => null,
+      // INFILE should be reset using STDIN not NULL
+      // because of https://bugs.php.net/bug.php?id=64247
+      // http://stackoverflow.com/a/15762515/1022648
+      CURLOPT_INFILE => STDIN,
       CURLOPT_INFILESIZE => null,
       CURLOPT_PUT => false,
       CURLOPT_POSTFIELDS => null,
