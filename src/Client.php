@@ -42,6 +42,7 @@ class Client {
   protected $_version;
 
   protected $_curl;
+  protected $_dummyFp;
 
   protected $_prodUrl = 'https://www.cashila.com/api';
   protected $_sandboxUrl = 'https://sandbox.cashila.com/api';
@@ -63,6 +64,13 @@ class Client {
     $this->_secret = $secret;
     $this->_sandbox = $sandbox;
     $this->_version = $version;
+  }
+
+  public function __destruct() {
+    if (null!==$this->_dummyFp) {
+      fclose($this->_dummyFp);
+      $this->_dummyFp = null;
+    }
   }
 
   /**
@@ -269,6 +277,13 @@ class Client {
     return $nonce[1] . str_pad(substr($nonce[0], 2, 6), 6, '0');
   }
 
+  protected function _getDummyFp() {
+    if (null===$this->_dummyFp) {
+      $this->_dummyFp = fopen('php://memory', 'r');
+    }
+    return $this->_dummyFp;
+  }
+
   /**
   * Prepares request: constructs url, headers (incl. payload signing)
   * @param string method, eg. get/post/...
@@ -350,10 +365,10 @@ class Client {
     }
 
     $curlOptions = [
-      // INFILE should be reset using STDIN not NULL
+      // INFILE should be reset using concrete fp not NULL
       // because of https://bugs.php.net/bug.php?id=64247
       // http://stackoverflow.com/a/15762515/1022648
-      CURLOPT_INFILE => STDIN,
+      CURLOPT_INFILE => $this->_getDummyFp(),
       CURLOPT_INFILESIZE => null,
       CURLOPT_PUT => false,
       CURLOPT_POSTFIELDS => null,
